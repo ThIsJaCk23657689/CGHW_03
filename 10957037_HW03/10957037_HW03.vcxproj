@@ -146,6 +146,8 @@
     <None Include="imgui.ini" />
     <None Include="Shaders\cubemap.fs" />
     <None Include="Shaders\cubemap.vs" />
+    <None Include="Shaders\lighting.fs" />
+    <None Include="Shaders\lighting.vs" />
     <None Include="Shaders\object.fs" />
     <None Include="Shaders\object.vs" />
     <None Include="Shaders\texture.fs" />

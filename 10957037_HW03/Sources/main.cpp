@@ -42,12 +42,13 @@ enum Monitor {
 	Monitor_Result,
 };
 
-
+void showUI();
 void setViewMatrix(int type);
 void setProjectionMatrix(int type);
 void setViewport(int type);
 void geneObejectData();
 void geneSphereData();
+void updateViewVolumeData();
 void drawFloor();
 void drawCube();
 void drawPlane();
@@ -119,13 +120,24 @@ bool showAxis = false;
 fcamera::FollowCamera followCamera(FollowCamearaPosition, ROVPosition);
 
 // Projection parameters
+static bool isPerspective = true;
 float aspect_wh = (float)SCR_WIDTH / (float)SCR_HEIGHT;
 float aspect_hw = (float)SCR_HEIGHT / (float)SCR_WIDTH;
+static float global_left = 0.0f;
+static float global_right = 0.0f;
+static float global_bottom = 0.0f;
+static float global_top = 0.0f;
 static float global_near = 0.1f;
 static float global_far = 250.0f;
+std::vector <glm::vec4> nearPlaneVertex;
+std::vector <glm::vec4> farPlaneVertex;
 
 // 0 => x-ortho, 1 => y-ortho, 2 => z-ortho, 3 => main-camera(perspective), 4 => all
 static int currentScreen = 4;
+static float distanceOrthoCamera = 5.0;
+
+// Light Parameters
+glm::vec3 lightPosition = glm::vec3(90.0f, 0.0f, 0.0f);
 
 // Object Data
 std::vector<float> cubeVertices;
@@ -215,35 +227,18 @@ int main() {
 	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
 	// Create shader program
-	Shader myShader("Shaders\\object.vs", "Shaders\\object.fs");
-	Shader textureShader("Shaders\\texture.vs", "Shaders\\texture.fs");
-	Shader cubemapShader("Shaders\\cubemap.vs", "Shaders\\cubemap.fs");
+	Shader myShader("Shaders/lighting.vs", "Shaders/lighting.fs");
+	// Shader textureShader("Shaders\\texture.vs", "Shaders\\texture.fs");
+	Shader cubemapShader("Shaders/cubemap.vs", "Shaders/cubemap.fs");
 	
 	// Create object data
-	float triangleVertices[] = {
-		// Positions
-		-1.0, -1.0, 0.0,
-		 1.0, -1.0, 0.0,
-		 0.0,  1.0, 0.0,
-	};
-	// Create & bind buffers
-	unsigned int triangleVAO, triangleVBO;
-	glGenVertexArrays(1, &triangleVAO);
-	glGenBuffers(1, &triangleVBO);
-	glBindVertexArray(triangleVAO);
-	glBindBuffer(GL_ARRAY_BUFFER, triangleVBO);
-	glBufferData(GL_ARRAY_BUFFER, sizeof(triangleVertices), triangleVertices, GL_STATIC_DRAW);
-	glEnableVertexAttribArray(0);
-	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
-	glBindVertexArray(0);
-
 	geneObejectData();
 
+	// Setting amount of fishes, boxed and grass. 
 	std::default_random_engine generator(time(NULL));
 	std::uniform_real_distribution<float> unif_g(-80.0, 80.0);
 	std::uniform_real_distribution<float> unif_f(-60.0, 60.0);
 	std::uniform_real_distribution<float> unif_b(-30.0, 30.0);
-	std::uniform_real_distribution<float> unif_seawave(0, 10);
 
 	std::vector<glm::vec3> boxposition;
 	for (int i = 0; i < 20; i++) {
@@ -281,8 +276,11 @@ int main() {
 	unsigned int cubemapTexture = loadCubemap(faces);
 
 	// binding texture to shader
-	textureShader.use();
-	textureShader.setInt("texture1", 0);
+	myShader.use();
+	myShader.setInt("material.diffuse", 0);
+	myShader.setInt("material.specular", 0);
+	myShader.setFloat("material.shininess", 64.0f);
+	myShader.setInt("skybox", 2);
 
 	// The main loop
 	while (!glfwWindowShouldClose(window)) {
@@ -297,225 +295,21 @@ int main() {
 		// Process Input (Moving camera)
 		processInput(window);
 
-		// feed inputs to dear imgui start new frame;
-		ImGui_ImplOpenGL3_NewFrame();
-		ImGui_ImplGlfw_NewFrame();
-		ImGui::NewFrame();
-
-		// 計算透視投影矩陣的各參數
-		float p_tn = tan(glm::radians(followCamera.Zoom / 2)) * global_near;
-		float p_bn = -p_tn;
-		float p_rn = p_tn * aspect_wh;
-		float p_ln = -p_rn;
-		
-		float p_tf = p_tn * global_far / global_near;
-		float p_bf = -p_tf;
-		float p_rf = p_rn * global_far / global_near;
-		float p_lf = -p_rf;
-
-		// 取得右下角之觀察矩陣後，求反矩陣
-		setViewMatrix(3);
-		glm::mat4 view_inv = glm::inverse(view);
-
-		// 創建近平面的4個頂點 （記得要將近平面往前多挪0.01，攝影機才不會看不到）
-		glm::vec4 rtnp = glm::vec4(p_rn, p_tn, -global_near + 0.01, 1.0);
-		glm::vec4 ltnp = glm::vec4(p_ln, p_tn, -global_near + 0.01, 1.0);
-		glm::vec4 rbnp = glm::vec4(p_rn, p_bn, -global_near + 0.01, 1.0);
-		glm::vec4 lbnp = glm::vec4(p_ln, p_bn, -global_near + 0.01, 1.0);
-
-		// 創建遠平面的4個頂點　（記得要將遠平面往後多挪0.01，背景才不會打架）
-		glm::vec4 rtfp = glm::vec4(p_rf, p_tf, -global_far - 0.01, 1.0);
-		glm::vec4 ltfp = glm::vec4(p_lf, p_tf, -global_far - 0.01, 1.0);
-		glm::vec4 rbfp = glm::vec4(p_rf, p_bf, -global_far - 0.01, 1.0);
-		glm::vec4 lbfp = glm::vec4(p_lf, p_bf, -global_far - 0.01, 1.0);
-
-		// 將這些頂點乘上觀察反矩陣，即可求出世界坐標系頂點
-		rtnp = view_inv * rtnp;
-		ltnp = view_inv * ltnp;
-		rbnp = view_inv * rbnp;
-		lbnp = view_inv * lbnp;
-
-		rtfp = view_inv * rtfp;
-		ltfp = view_inv * ltfp;
-		rbfp = view_inv * rbfp;
-		lbfp = view_inv * lbfp;
-
-		viewVolumeVertices = {
-			// positions				// texture coords
-
-			// Front
-			rtnp.x, rtnp.y, rtnp.z,		1.0f, 1.0f,
-			rbnp.x, rbnp.y, rbnp.z,		1.0f, 0.0f,
-			lbnp.x, lbnp.y, lbnp.z,		0.0f, 0.0f,
-			ltnp.x, ltnp.y, ltnp.z,		0.0f, 1.0f,
-
-			// right
-			rtnp.x, rtnp.y, rtnp.z,		1.0f, 1.0f,
-			rtfp.x, rtfp.y, rtfp.z,		1.0f, 0.0f,
-			rbfp.x, rbfp.y, rbfp.z,		0.0f, 0.0f,
-			rbnp.x, rbnp.y, rbnp.z,		0.0f, 1.0f,
-
-			// left
-			ltnp.x, ltnp.y, ltnp.z,		1.0f, 1.0f,
-			ltfp.x, ltfp.y, ltfp.z,		1.0f, 0.0f,
-			lbfp.x, lbfp.y, lbfp.z,		0.0f, 0.0f,
-			lbnp.x, lbnp.y, lbnp.z,		0.0f, 1.0f,
-
-			// Top
-			rtnp.x, rtnp.y, rtnp.z,		1.0f, 1.0f,
-			rtfp.x, rtfp.y, rtfp.z,		1.0f, 0.0f,
-			ltfp.x, ltfp.y, ltfp.z,		0.0f, 0.0f,
-			ltnp.x, ltnp.y, ltnp.z,		0.0f, 1.0f,
-
-			// Down
-			rbnp.x, rbnp.y, rbnp.z,		1.0f, 1.0f,
-			rbfp.x, rbfp.y, rbfp.z,		1.0f, 0.0f,
-			lbfp.x, lbfp.y, lbfp.z,		0.0f, 0.0f,
-			lbnp.x, lbnp.y, lbnp.z,		0.1f, 0.0f,
-
-			rtfp.x, rtfp.y, rtfp.z,		1.0f, 1.0f,
-			rbfp.x,	rbfp.y, rbfp.z,		1.0f, 0.0f,
-			lbfp.x,	lbfp.y, lbfp.z,		0.0f, 0.0f,
-			ltfp.x,	ltfp.y, ltfp.z,		0.1f, 0.0f,
-		};
-
-		// Drawing ImGui Control Panel
-		ImGui::Begin("Control Panel");
-		ImGuiTabBarFlags tab_bar_flags = ImGuiBackendFlags_None;
-		if(ImGui::BeginTabBar("MyTabBar", tab_bar_flags)) {
-			if(ImGui::BeginTabItem("ROV")) {
-				ImGui::Text("Position = (%.2f, %.2f, %.2f)", ROVPosition.x, ROVPosition.y, ROVPosition.z);
-				ImGui::Text("Front = (%.2f, %.2f, %.2f)", ROVFront.x, ROVFront.y, ROVFront.z);
-				ImGui::Text("Right = (%.2f, %.2f, %.2f)", ROVRight.x, ROVRight.y, ROVRight.z);
-				ImGui::Text("Pitch = %.2f deg", ROVYaw);
-				ImGui::SliderFloat("Speed", &ROVMovementSpeed, 1, 20);
-				ImGui::EndTabItem();
-			}
-			if (ImGui::BeginTabItem("Camera")) {
-				if (isGhost) {
-					ImGui::TextColored(ImVec4(1.0f, 0.5f, 1.0f, 1.0f), "Ghost Camera");
-					ImGui::Text("Position = (%.2f, %.2f, %.2f)", camera.Position.x, camera.Position.y, camera.Position.z);
-					ImGui::Text("Front = (%.2f, %.2f, %.2f)", camera.Front.x, camera.Front.y, camera.Front.z);
-					ImGui::Text("Right = (%.2f, %.2f, %.2f)", camera.Right.x, camera.Right.y, camera.Right.z);
-					ImGui::Text("Up = (%.2f, %.2f, %.2f)", camera.Up.x, camera.Up.y, camera.Up.z);
-					ImGui::Text("Pitch = %.2f deg, Yaw = %.2f deg", camera.Pitch, camera.Yaw);
-				} else {
-					ImGui::TextColored(ImVec4(1.0f, 0.5f, 1.0f, 1.0f), "Follow Camera");
-					ImGui::Text("Position = (%.2f, %.2f, %.2f)", followCamera.Position.x, followCamera.Position.y, followCamera.Position.z);
-					ImGui::Text("Front = (%.2f, %.2f, %.2f)", followCamera.Front.x, followCamera.Front.y, followCamera.Front.z);
-					ImGui::Text("Right = (%.2f, %.2f, %.2f)", followCamera.Right.x, followCamera.Right.y, followCamera.Right.z);
-					ImGui::Text("Up = (%.2f, %.2f, %.2f)", followCamera.Up.x, followCamera.Up.y, followCamera.Up.z);
-					ImGui::Text("Target = (%.2f, %.2f, %.2f)", followCamera.Target.x, followCamera.Target.y, followCamera.Target.z);
-					ImGui::Text("Distance = %.2f", followCamera.Distance);
-					ImGui::Text("Pitch = %.2f deg, Yaw = %.2f deg", followCamera.Pitch, followCamera.Yaw);
-				}
-				ImGui::EndTabItem();
-			}
-			if (ImGui::BeginTabItem("Projection")) {
-
-				ImGui::TextColored(ImVec4(1.0f, 0.5f, 1.0f, 1.0f), "Perspective Projection");
-				ImGui::Text("Parameters");
-				ImGui::BulletText("FoV = %.2f deg, Aspect = %.2f", followCamera.Zoom, aspect_wh);
-				ImGui::SliderFloat("Near", &global_near, 0.1, 10);
-				ImGui::SliderFloat("Far", &global_far, 10, 250);
-				ImGui::Spacing();
-
-				if (ImGui::TreeNode("Projection Matrix")) {
-					glm::mat4 proj = GetPerspectiveProjMatrix(glm::radians(followCamera.Zoom), aspect_wh, global_near, global_far);
-
-					ImGui::Columns(4, "mycolumns");
-					ImGui::Separator();
-					for (int i = 0; i < 4; i++){
-						ImGui::Text("%.2f", proj[0][i]); ImGui::NextColumn();
-						ImGui::Text("%.2f", proj[1][i]); ImGui::NextColumn();
-						ImGui::Text("%.2f", proj[2][i]); ImGui::NextColumn();
-						ImGui::Text("%.2f", proj[3][i]); ImGui::NextColumn();
-						ImGui::Separator();
-					}
-					ImGui::Columns(1);
-					
-					ImGui::TreePop();
-				}
-				ImGui::Spacing();
-
-				if (ImGui::TreeNode("View Volume Vertices")) {
-					ImGui::BulletText("rtnp: (%.2f, %.2f, %.2f)", rtnp.x, rtnp.y, rtnp.z);
-					ImGui::BulletText("ltnp: (%.2f, %.2f, %.2f)", ltnp.x, ltnp.y, ltnp.z);
-					ImGui::BulletText("rbnp: (%.2f, %.2f, %.2f)", rbnp.x, rbnp.y, rbnp.z);
-					ImGui::BulletText("lbnp: (%.2f, %.2f, %.2f)", lbnp.x, lbnp.y, lbnp.z);
-					ImGui::BulletText("rtfp: (%.2f, %.2f, %.2f)", rtfp.x, rtfp.y, ltfp.z);
-					ImGui::BulletText("ltfp: (%.2f, %.2f, %.2f)", ltfp.x, ltfp.y, ltfp.z);
-					ImGui::BulletText("rbfp: (%.2f, %.2f, %.2f)", rbfp.x, rbfp.y, rbfp.z);
-					ImGui::BulletText("lbfp: (%.2f, %.2f, %.2f)", lbfp.x, lbfp.y, lbfp.z);
-					ImGui::TreePop();
-				}
-				ImGui::Spacing();
-				
-				ImGui::EndTabItem();
-			}
-			if (ImGui::BeginTabItem("Illustration")) {
-
-				ImGui::Text("Current Screen: %d", currentScreen + 1);
-				ImGui::Text("Ghost Mode: %s", isGhost ? "True" : "false");
-				ImGui::Text("Showing Axes: %s", showAxis ? "True" : "false");
-				ImGui::Text("Full Screen:  %s", isfullscreen ? "True" : "false");
-				
-				ImGui::Spacing();
-				
-				if (ImGui::TreeNode("General")) {
-					ImGui::BulletText("Press G to switch Ghost Mode");
-					ImGui::BulletText("Press X to show / hide the axes");
-					ImGui::BulletText("Press 1~5 to switch the screen");
-					ImGui::BulletText("Press F11 to Full Screen");
-					ImGui::BulletText("Press ESC to close the program");
-					ImGui::TreePop();
-				}
-				ImGui::Spacing();
-				
-				if (ImGui::TreeNode("ROV Illustration")) {
-					ImGui::BulletText("Press W to Forward");
-					ImGui::BulletText("Press S to Backward");
-					ImGui::BulletText("Press A to Move Left");
-					ImGui::BulletText("Press D to Move Right");
-					ImGui::BulletText("Press Q to Turn left");
-					ImGui::BulletText("Press E to Turn right");
-					ImGui::BulletText("Press Left Shift to Dive");
-					ImGui::BulletText("Press Space to Rise");
-					ImGui::TreePop();
-				}
-				ImGui::Spacing();
-				
-				if (ImGui::TreeNode("Follow Camera Illustration")) {
-					ImGui::BulletText("Press O to Increase Distance");
-					ImGui::BulletText("Press P to Decrease Distance");
-					ImGui::BulletText("Hold mouse right button to change view angle");
-					ImGui::BulletText("Mouse scroll to Zoom in / out");
-					ImGui::TreePop();
-				}
-				ImGui::Spacing();
-				
-				if (ImGui::TreeNode("Ghost Camera Illustration")) {
-					ImGui::BulletText("WSAD to move camera");
-					ImGui::BulletText("Hold mouse right button to rotate");
-					ImGui::BulletText("Press Left Shift to speed up");
-					ImGui::TreePop();
-				}
-				ImGui::Spacing();
-				
-				ImGui::EndTabItem();
-			}
-			ImGui::EndTabBar();
-		}
-		ImGui::Spacing();
-		ImGui::Separator();
-		ImGui::End();
-		
-		ImGui::ShowDemoWindow();
-
 		// Clear the buffer
 		glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
 		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
+		// Update the view volume
+		updateViewVolumeData();
+
+		// feed inputs to dear imgui start new frame;
+		ImGui_ImplOpenGL3_NewFrame();
+		ImGui_ImplGlfw_NewFrame();
+		ImGui::NewFrame();
+		showUI();
+		// ImGui::ShowDemoWindow();
+
+		// 控制螢幕顯示
 		int scr_start = 0, scr_end = 3;
 		if(currentScreen == 0) {
 			scr_start = 0;
@@ -537,17 +331,29 @@ int main() {
 			setViewport(i);
 
 			// Enable Shader and setting view & projection matrix
-			textureShader.use();
-			textureShader.setMat4("view", view);
-			textureShader.setMat4("projection", projection);
-
 			myShader.use();
 			myShader.setMat4("view", view);
 			myShader.setMat4("projection", projection);
-			myShader.setBool("setFloat", 1.0f);
+
+			myShader.setBool("isCubeMap", false);
+			myShader.setBool("isGlowObj", false);
+			myShader.setFloat("alpha", 1.0f);
+			myShader.setVec3("color", glm::vec3(1.0f, 0.0f, 0.0f));
+			myShader.setVec3("viewPos", (isGhost) ? camera.Position: followCamera.Position);
+			
+			myShader.setVec3("light.position", lightPosition);
+			myShader.setVec3("light.ambient", glm::vec3(0.2f, 0.2, 0.2f));
+			myShader.setVec3("light.diffuse", glm::vec3(0.9f, 0.9f, 0.9f));
+			myShader.setVec3("light.specular", glm::vec3(0.4f, 0.4f, 0.4f));
+			myShader.setFloat("light.constant", 1.0f);
+			myShader.setFloat("light.linear", 0.007f);
+			myShader.setFloat("light.quadratic", 0.0002f);
+
+			// Render on the screen;
 
 			// Draw origin and 3 axes 
 			if (showAxis) {
+				myShader.setBool("enableTexture", false);
 				modelMatrix.push();
 					modelMatrix.save(glm::scale(modelMatrix.top(), glm::vec3(0.2f, 0.2f, 0.2f)));
 					myShader.setVec3("color", glm::vec3(0.1, 0.1, 0.1));
@@ -557,50 +363,33 @@ int main() {
 				drawAxis(myShader);
 			}
 
-			// Render on the screen;
-
-			//modelMatrix.push();
-				//modelMatrix.save(glm::rotate(modelMatrix.top(), glm::radians(45.0f), glm::vec3(1.0f, 0.0f, 0.0f)));
-				//myShader.setMat4("model", modelMatrix.top());
-				//myShader.setVec3("color", glm::vec3(1.0, 0.0, 0.0));
-				//glBindVertexArray(triangleVAO);
-				//glDrawArrays(GL_TRIANGLES, 0, 3);
-			//modelMatrix.pop();
-
 			// Draw Skybox (Using Cubemap)
 			glDepthFunc(GL_LEQUAL);
-			cubemapShader.use();
-			glm::mat4 view_skybox = glm::mat4(1.0f);
-			if(isGhost) {
-				view_skybox = glm::mat4(glm::mat3(camera.GetViewMatrix()));
-			}else {
-				view_skybox = glm::mat4(glm::mat3(followCamera.GetViewMatrix()));
-			}
-			cubemapShader.setMat4("view", view_skybox);
-			cubemapShader.setMat4("projection", projection);
+			myShader.setBool("isCubeMap", true);
 			modelMatrix.push();
-				glActiveTexture(GL_TEXTURE0);
+				glActiveTexture(GL_TEXTURE2);
 				glBindTexture(GL_TEXTURE_CUBE_MAP, cubemapTexture);
-				modelMatrix.save(glm::scale(modelMatrix.top(), glm::vec3(80.0f, 80.0f, 80.0f)));
+				modelMatrix.save(glm::scale(modelMatrix.top(), glm::vec3(distanceOrthoCamera * 5.34)));
 				// myShader.setVec3("color", glm::vec3(0.294117647 * daytime, 0.623529412 * daytime, 0.949019608 * daytime));
-				cubemapShader.setMat4("model", modelMatrix.top());
+				myShader.setMat4("model", modelMatrix.top());
 				drawCube();
 			modelMatrix.pop();
+			myShader.setBool("isCubeMap", false);
 			glDepthFunc(GL_LESS);
 
-			textureShader.use();
-			textureShader.setMat4("model", modelMatrix.top());
-
 			// Draw Sea
+			myShader.use();
+			glActiveTexture(GL_TEXTURE0);
 			glBindTexture(GL_TEXTURE_2D, seaTexture);
-			textureShader.setMat4("model", modelMatrix.top());
+			myShader.setBool("enableTexture", true);
+			myShader.setMat4("model", modelMatrix.top());
 			drawFloor();
 
 			// Draw Seabed (Sand)
 			modelMatrix.push();
 				// draw sand
 				modelMatrix.save(glm::translate(modelMatrix.top(), glm::vec3(0.0f, -5.0f, 0.0f)));
-				textureShader.setMat4("model", modelMatrix.top());
+				myShader.setMat4("model", modelMatrix.top());
 				glBindTexture(GL_TEXTURE_2D, sandTexture);
 				drawFloor();
 
@@ -608,7 +397,7 @@ int main() {
 				for (unsigned int i = 0; i < grassposition.size(); i++) {
 					modelMatrix.push();
 						modelMatrix.save(glm::translate(modelMatrix.top(), grassposition[i]));
-						textureShader.setMat4("model", modelMatrix.top());
+						myShader.setMat4("model", modelMatrix.top());
 						drawGrass();
 					modelMatrix.pop();
 				}
@@ -623,7 +412,7 @@ int main() {
 					modelMatrix.save(glm::rotate(modelMatrix.top(), glm::radians(currentTime * 5), glm::vec3(0.0, 1.0, 0.0)));
 					modelMatrix.save(glm::translate(modelMatrix.top(), fishposition[i]));
 					modelMatrix.save(glm::scale(modelMatrix.top(), glm::vec3(1.0f, 0.5f, 0.5f)));
-					textureShader.setMat4("model", modelMatrix.top());
+					myShader.setMat4("model", modelMatrix.top());
 					drawFish();
 					modelMatrix.pop();
 				}
@@ -634,14 +423,14 @@ int main() {
 				for (unsigned int i = 0; i < boxposition.size(); i++) {
 					modelMatrix.push();
 					modelMatrix.save(glm::translate(modelMatrix.top(), glm::vec3(boxposition[i].x, sin(currentTime * 3 + boxposition[i].z) / 4, boxposition[i].z)));
-					textureShader.setMat4("model", modelMatrix.top());
+					myShader.setMat4("model", modelMatrix.top());
 					drawBox();
 					modelMatrix.pop();
 				}
 			modelMatrix.pop();
 
 			// Draw ROV
-			myShader.use();
+			myShader.setBool("enableTexture", false);
 			modelMatrix.push();
 				modelMatrix.save(glm::translate(modelMatrix.top(), ROVPosition));
 				modelMatrix.save(glm::rotate(modelMatrix.top(), glm::radians(ROVYaw), glm::vec3(0.0, 1.0, 0.0)));
@@ -689,13 +478,15 @@ int main() {
 			modelMatrix.pop();
 
 			// draw sun
+			myShader.setBool("isGlowObj", true);
 			modelMatrix.push();
-				modelMatrix.save(glm::rotate(modelMatrix.top(), glm::radians(currentTime * 5), glm::vec3(0.0, 0.0, 1.0)));
-				modelMatrix.save(glm::translate(modelMatrix.top(), glm::vec3(90.0f, 0.0, 0.0)));
-				myShader.setVec3("color", glm::vec3(1.0 * daytime, 0.682352941 * daytime, 0.0));
+				lightPosition = glm::vec3(cos(currentTime / 10) * 90.0f, sin(currentTime / 10) * 90.0f, 0.0f);
+				modelMatrix.save(glm::translate(modelMatrix.top(), lightPosition));
+				myShader.setVec3("color", glm::vec3(1.0, 1.0, 1.0));
 				myShader.setMat4("model", modelMatrix.top());
 				drawSphere();
 			modelMatrix.pop();
+			myShader.setBool("isGlowObj", false);
 		}
 
 		// render on the screen
@@ -716,9 +507,6 @@ int main() {
 	glDeleteVertexArrays(1, &planeVAO);
 	glDeleteBuffers(1, &planeVBO);
 
-	glDeleteVertexArrays(1, &triangleVAO);
-	glDeleteBuffers(1, &triangleVBO);
-
 	glDeleteVertexArrays(1, &viewVolumeVAO);
 	glDeleteBuffers(1, &viewVolumeVBO);
 	glDeleteBuffers(1, &viewVolumeEBO);
@@ -731,18 +519,156 @@ int main() {
 	return 0;
 }
 
+void showUI() {
+	ImGui::Begin("Control Panel");
+	ImGuiTabBarFlags tab_bar_flags = ImGuiBackendFlags_None;
+	if (ImGui::BeginTabBar("MyTabBar", tab_bar_flags)) {
+		if (ImGui::BeginTabItem("ROV")) {
+			ImGui::Text("Position = (%.2f, %.2f, %.2f)", ROVPosition.x, ROVPosition.y, ROVPosition.z);
+			ImGui::Text("Front = (%.2f, %.2f, %.2f)", ROVFront.x, ROVFront.y, ROVFront.z);
+			ImGui::Text("Right = (%.2f, %.2f, %.2f)", ROVRight.x, ROVRight.y, ROVRight.z);
+			ImGui::Text("Pitch = %.2f deg", ROVYaw);
+			ImGui::SliderFloat("Speed", &ROVMovementSpeed, 1, 20);
+			ImGui::EndTabItem();
+		}
+		if (ImGui::BeginTabItem("Camera")) {
+			if (isGhost) {
+				ImGui::TextColored(ImVec4(1.0f, 0.5f, 1.0f, 1.0f), "Ghost Camera");
+				ImGui::Text("Position = (%.2f, %.2f, %.2f)", camera.Position.x, camera.Position.y, camera.Position.z);
+				ImGui::Text("Front = (%.2f, %.2f, %.2f)", camera.Front.x, camera.Front.y, camera.Front.z);
+				ImGui::Text("Right = (%.2f, %.2f, %.2f)", camera.Right.x, camera.Right.y, camera.Right.z);
+				ImGui::Text("Up = (%.2f, %.2f, %.2f)", camera.Up.x, camera.Up.y, camera.Up.z);
+				ImGui::Text("Pitch = %.2f deg, Yaw = %.2f deg", camera.Pitch, camera.Yaw);
+			}
+			else {
+				ImGui::TextColored(ImVec4(1.0f, 0.5f, 1.0f, 1.0f), "Follow Camera");
+				ImGui::Text("Position = (%.2f, %.2f, %.2f)", followCamera.Position.x, followCamera.Position.y, followCamera.Position.z);
+				ImGui::Text("Front = (%.2f, %.2f, %.2f)", followCamera.Front.x, followCamera.Front.y, followCamera.Front.z);
+				ImGui::Text("Right = (%.2f, %.2f, %.2f)", followCamera.Right.x, followCamera.Right.y, followCamera.Right.z);
+				ImGui::Text("Up = (%.2f, %.2f, %.2f)", followCamera.Up.x, followCamera.Up.y, followCamera.Up.z);
+				ImGui::Text("Target = (%.2f, %.2f, %.2f)", followCamera.Target.x, followCamera.Target.y, followCamera.Target.z);
+				ImGui::Text("Distance = %.2f", followCamera.Distance);
+				ImGui::Text("Pitch = %.2f deg, Yaw = %.2f deg", followCamera.Pitch, followCamera.Yaw);
+			}
+			ImGui::EndTabItem();
+		}
+		if (ImGui::BeginTabItem("Projection")) {
+
+			ImGui::TextColored(ImVec4(1.0f, 0.5f, 1.0f, 1.0f), (isPerspective) ? "Perspective Projection" : "Orthogonal Projection");
+			ImGui::Text("Parameters");
+			ImGui::BulletText("FoV = %.2f deg, Aspect = %.2f", (isGhost) ? camera.Zoom : followCamera.Zoom, aspect_wh);
+			ImGui::BulletText("left: %.2f, right: %.2f ", global_left, global_right);
+			ImGui::BulletText("bottom: %.2f, top: %.2f ", global_bottom, global_top);
+			ImGui::SliderFloat("Near", &global_near, 0.1, 10);
+			ImGui::SliderFloat("Far", &global_far, 10, 250);
+			ImGui::Spacing();
+
+			if (ImGui::TreeNode("Projection Matrix")) {
+				setProjectionMatrix(3);
+				glm::mat4 proj = projection;
+
+				ImGui::Columns(4, "mycolumns");
+				ImGui::Separator();
+				for (int i = 0; i < 4; i++) {
+					ImGui::Text("%.2f", proj[0][i]); ImGui::NextColumn();
+					ImGui::Text("%.2f", proj[1][i]); ImGui::NextColumn();
+					ImGui::Text("%.2f", proj[2][i]); ImGui::NextColumn();
+					ImGui::Text("%.2f", proj[3][i]); ImGui::NextColumn();
+					ImGui::Separator();
+				}
+				ImGui::Columns(1);
+
+				ImGui::TreePop();
+			}
+			ImGui::Spacing();
+
+			if (ImGui::TreeNode("View Volume Vertices")) {
+				ImGui::BulletText("rtnp: (%.2f, %.2f, %.2f)", nearPlaneVertex[0].x, nearPlaneVertex[0].y, nearPlaneVertex[0].z);
+				ImGui::BulletText("ltnp: (%.2f, %.2f, %.2f)", nearPlaneVertex[1].x, nearPlaneVertex[1].y, nearPlaneVertex[1].z);
+				ImGui::BulletText("rbnp: (%.2f, %.2f, %.2f)", nearPlaneVertex[2].x, nearPlaneVertex[2].y, nearPlaneVertex[2].z);
+				ImGui::BulletText("lbnp: (%.2f, %.2f, %.2f)", nearPlaneVertex[3].x, nearPlaneVertex[3].y, nearPlaneVertex[3].z);
+				ImGui::BulletText("rtfp: (%.2f, %.2f, %.2f)", farPlaneVertex[0].x, farPlaneVertex[0].y, farPlaneVertex[0].z);
+				ImGui::BulletText("ltfp: (%.2f, %.2f, %.2f)", farPlaneVertex[1].x, farPlaneVertex[1].y, farPlaneVertex[1].z);
+				ImGui::BulletText("rbfp: (%.2f, %.2f, %.2f)", farPlaneVertex[2].x, farPlaneVertex[2].y, farPlaneVertex[2].z);
+				ImGui::BulletText("lbfp: (%.2f, %.2f, %.2f)", farPlaneVertex[3].x, farPlaneVertex[3].y, farPlaneVertex[3].z);
+				ImGui::TreePop();
+			}
+			ImGui::Spacing();
+
+			ImGui::EndTabItem();
+		}
+		if (ImGui::BeginTabItem("Illustration")) {
+
+			ImGui::Text("Current Screen: %d", currentScreen + 1);
+			ImGui::Text("Ghost Mode: %s", isGhost ? "True" : "false");
+			ImGui::Text("Projection Mode: %s", isPerspective ? "Perspective" : "Orthogonal");
+			ImGui::Text("Showing Axes: %s", showAxis ? "True" : "false");
+			ImGui::Text("Full Screen:  %s", isfullscreen ? "True" : "false");
+			ImGui::SliderFloat("zoom", &distanceOrthoCamera, 5, 25);
+			ImGui::Spacing();
+
+			if (ImGui::TreeNode("General")) {
+				ImGui::BulletText("Press G to switch Ghost Mode");
+				ImGui::BulletText("Press X to show / hide the axes");
+				ImGui::BulletText("Press Y to switch the projection");
+				ImGui::BulletText("Press 1~5 to switch the screen");
+				ImGui::BulletText("Press F11 to Full Screen");
+				ImGui::BulletText("Press ESC to close the program");
+				ImGui::TreePop();
+			}
+			ImGui::Spacing();
+
+			if (ImGui::TreeNode("ROV Illustration")) {
+				ImGui::BulletText("Press W to Forward");
+				ImGui::BulletText("Press S to Backward");
+				ImGui::BulletText("Press A to Move Left");
+				ImGui::BulletText("Press D to Move Right");
+				ImGui::BulletText("Press Q to Turn left");
+				ImGui::BulletText("Press E to Turn right");
+				ImGui::BulletText("Press Left Shift to Dive");
+				ImGui::BulletText("Press Space to Rise");
+				ImGui::TreePop();
+			}
+			ImGui::Spacing();
+
+			if (ImGui::TreeNode("Follow Camera Illustration")) {
+				ImGui::BulletText("Press O to Increase Distance");
+				ImGui::BulletText("Press P to Decrease Distance");
+				ImGui::BulletText("Hold mouse right button to change view angle");
+				ImGui::BulletText("Mouse scroll to Zoom in / out");
+				ImGui::TreePop();
+			}
+			ImGui::Spacing();
+
+			if (ImGui::TreeNode("Ghost Camera Illustration")) {
+				ImGui::BulletText("WSAD to move camera");
+				ImGui::BulletText("Hold mouse right button to rotate");
+				ImGui::BulletText("Press Left Shift to speed up");
+				ImGui::TreePop();
+			}
+			ImGui::Spacing();
+
+			ImGui::EndTabItem();
+		}
+		ImGui::EndTabBar();
+	}
+	ImGui::Spacing();
+	ImGui::Separator();
+	ImGui::End();
+}
+
 void setViewMatrix(int type) {
 
 	if (isGhost) {
 		switch (type) {
 			case Monitor::Monitor_X:
-				view = glm::lookAt(camera.Position + glm::vec3(15.0, 0.0, 0.0), camera.Position, glm::vec3(0.0, 1.0, 0.0));
+				view = glm::lookAt(camera.Position + glm::vec3(distanceOrthoCamera, 0.0, 0.0), camera.Position, glm::vec3(0.0, 1.0, 0.0));
 				break;
 			case Monitor::Monitor_Y:
-				view = glm::lookAt(camera.Position + glm::vec3(0.0, 15.0, 0.0), camera.Position, glm::vec3(0.0, 0.0, -1.0));
+				view = glm::lookAt(camera.Position + glm::vec3(0.0, distanceOrthoCamera, 0.0), camera.Position, glm::vec3(0.0, 0.0, -1.0));
 				break;
 			case Monitor::Monitor_Z:
-				view = glm::lookAt(camera.Position + glm::vec3(0.0, 0.0, 15.0), camera.Position, glm::vec3(0.0, 1.0, 0.0));
+				view = glm::lookAt(camera.Position + glm::vec3(0.0, 0.0, distanceOrthoCamera), camera.Position, glm::vec3(0.0, 1.0, 0.0));
 				break;
 			case Monitor::Monitor_Result:
 				view = camera.GetViewMatrix();
@@ -751,13 +677,13 @@ void setViewMatrix(int type) {
 	} else {
 		switch (type) {
 			case Monitor::Monitor_X:
-				view = glm::lookAt(followCamera.Position + glm::vec3(15.0, 0.0, 0.0), followCamera.Position, glm::vec3(0.0, 1.0, 0.0));
+				view = glm::lookAt(followCamera.Position + glm::vec3(distanceOrthoCamera, 0.0, 0.0), followCamera.Position, glm::vec3(0.0, 1.0, 0.0));
 				break;
 			case Monitor::Monitor_Y:
-				view = glm::lookAt(followCamera.Position + glm::vec3(0.0, 15.0, 0.0), followCamera.Position, glm::vec3(0.0, 0.0, -1.0));
+				view = glm::lookAt(followCamera.Position + glm::vec3(0.0, distanceOrthoCamera, 0.0), followCamera.Position, glm::vec3(0.0, 0.0, -1.0));
 				break;
 			case Monitor::Monitor_Z:
-				view = glm::lookAt(followCamera.Position + glm::vec3(0.0, 0.0, 15.0), followCamera.Position, glm::vec3(0.0, 1.0, 0.0));
+				view = glm::lookAt(followCamera.Position + glm::vec3(0.0, 0.0, distanceOrthoCamera), followCamera.Position, glm::vec3(0.0, 1.0, 0.0));
 				break;
 			case Monitor::Monitor_Result:
 				view = followCamera.GetViewMatrix();
@@ -772,15 +698,33 @@ void setProjectionMatrix(int type) {
 
 	if (type == Monitor::Monitor_Result) {
 		if (isGhost) {
-			projection = GetPerspectiveProjMatrix(glm::radians(camera.Zoom), aspect_wh, global_near, global_far);
+			if (isPerspective) {
+				projection = GetPerspectiveProjMatrix(glm::radians(camera.Zoom), aspect_wh, global_near, global_far);
+			} else {
+				float length = tan(glm::radians(camera.Zoom / 2)) * global_near * 50;
+				if (SCR_WIDTH > SCR_HEIGHT) {
+					projection = GetOrthoProjMatrix(-length, length, -length * aspect_hw, length * aspect_hw, global_near, global_far);
+				} else {
+					projection = GetOrthoProjMatrix(-length * aspect_wh, length * aspect_wh, -length, length, global_near, global_far);
+				}
+			}
 		} else {
-			projection = GetPerspectiveProjMatrix(glm::radians(followCamera.Zoom), aspect_wh, global_near, global_far);
+			if(isPerspective) {
+				projection = GetPerspectiveProjMatrix(glm::radians(followCamera.Zoom), aspect_wh, global_near, global_far);
+			} else {
+				float length = tan(glm::radians(followCamera.Zoom / 2)) * global_near * 50;
+				if (SCR_WIDTH > SCR_HEIGHT) {
+					projection = GetOrthoProjMatrix(-length, length, -length * aspect_hw, length * aspect_hw, global_near, global_far);
+				} else {
+					projection = GetOrthoProjMatrix(-length * aspect_wh, length * aspect_wh, -length, length, global_near, global_far);
+				}
+			}
 		}
 	} else {
 		if (SCR_WIDTH > SCR_HEIGHT) {
-			projection = GetOrthoProjMatrix(-5.0f, 5.0f, -5.0f * aspect_hw, 5.0f * aspect_hw, 0.1f, 250.0f);
+			projection = GetOrthoProjMatrix(-distanceOrthoCamera, distanceOrthoCamera, -distanceOrthoCamera * aspect_hw, distanceOrthoCamera * aspect_hw, 0.1f, 250.0f);
 		} else {
-			projection = GetOrthoProjMatrix(-5.0f * aspect_wh, 5.0f * aspect_wh, -5.0f, 5.0f, 0.1f, 250.0f);
+			projection = GetOrthoProjMatrix(-distanceOrthoCamera * aspect_wh, distanceOrthoCamera * aspect_wh, -distanceOrthoCamera, distanceOrthoCamera, 0.1f, 250.0f);
 		}
 	}
 }
@@ -809,36 +753,36 @@ void setViewport(int type) {
 void geneObejectData() {
 	// ========== Generate Cube vertex data ==========
 	cubeVertices = {
-		// positions			// texture coords
-		 0.5f,  0.5f,  0.5f,	1.0f, 1.0f,
-		 0.5f, -0.5f,  0.5f,	1.0f, 0.0f,
-		-0.5f, -0.5f,  0.5f,	0.0f, 0.0f,
-		-0.5f,  0.5f,  0.5f,	0.0f, 1.0f,
+		// Positions			// Normals 			// Texture coords
+		 0.5f,  0.5f,  0.5f,	0.0f, 0.0f, 1.0f,	1.0f, 1.0f,
+		 0.5f, -0.5f,  0.5f,	0.0f, 0.0f, 1.0f,	1.0f, 0.0f,
+		-0.5f, -0.5f,  0.5f,	0.0f, 0.0f, 1.0f,	0.0f, 0.0f,
+		-0.5f,  0.5f,  0.5f,	0.0f, 0.0f, 1.0f,	0.0f, 1.0f,
 
-		0.5f,  0.5f,  0.5f,		1.0f, 1.0f,
-		0.5f,  0.5f, -0.5f,		1.0f, 0.0f,
-		0.5f, -0.5f, -0.5f,		0.0f, 0.0f,
-		0.5f, -0.5f,  0.5f,		0.0f, 1.0f,
+		0.5f,  0.5f,  0.5f,		1.0f, 0.0f, 0.0f,	1.0f, 1.0f,
+		0.5f,  0.5f, -0.5f,		1.0f, 0.0f, 0.0f,	1.0f, 0.0f,
+		0.5f, -0.5f, -0.5f,		1.0f, 0.0f, 0.0f,	0.0f, 0.0f,
+		0.5f, -0.5f,  0.5f,		1.0f, 0.0f, 0.0f,	0.0f, 1.0f,
 
-		-0.5f,  0.5f,  0.5f,	1.0f, 1.0f,
-		-0.5f,  0.5f, -0.5f,	1.0f, 0.0f,
-		-0.5f, -0.5f, -0.5f,	0.0f, 0.0f,
-		-0.5f, -0.5f,  0.5f,	0.0f, 1.0f,
+		-0.5f,  0.5f,  0.5f,	-1.0f, 0.0f, 0.0f,	1.0f, 1.0f,
+		-0.5f,  0.5f, -0.5f,	-1.0f, 0.0f, 0.0f,	1.0f, 0.0f,
+		-0.5f, -0.5f, -0.5f,	-1.0f, 0.0f, 0.0f,	0.0f, 0.0f,
+		-0.5f, -0.5f,  0.5f,	-1.0f, 0.0f, 0.0f,	0.0f, 1.0f,
 
-		 0.5f,  0.5f,  0.5f,	1.0f, 1.0f,
-		 0.5f,  0.5f, -0.5f,	1.0f, 0.0f,
-		-0.5f,  0.5f, -0.5f,	0.0f, 0.0f,
-		-0.5f,  0.5f,  0.5f,	0.0f, 1.0f,
+		 0.5f,  0.5f,  0.5f,	0.0f, 1.0f, 0.0f,	1.0f, 1.0f,
+		 0.5f,  0.5f, -0.5f,	0.0f, 1.0f, 0.0f,	1.0f, 0.0f,
+		-0.5f,  0.5f, -0.5f,	0.0f, 1.0f, 0.0f,	0.0f, 0.0f,
+		-0.5f,  0.5f,  0.5f,	0.0f, 1.0f, 0.0f,	0.0f, 1.0f,
 
-		 0.5f, -0.5f,  0.5f,	1.0f, 1.0f,
-		 0.5f, -0.5f, -0.5f,	1.0f, 0.0f,
-		-0.5f, -0.5f, -0.5f,	0.0f, 0.0f,
-		-0.5f, -0.5f,  0.5f,	0.0f, 1.0f,
+		 0.5f, -0.5f,  0.5f,	0.0f, -1.0f, 0.0f,	1.0f, 1.0f,
+		 0.5f, -0.5f, -0.5f,	0.0f, -1.0f, 0.0f,	1.0f, 0.0f,
+		-0.5f, -0.5f, -0.5f,	0.0f, -1.0f, 0.0f,	0.0f, 0.0f,
+		-0.5f, -0.5f,  0.5f,	0.0f, -1.0f, 0.0f,	0.0f, 1.0f,
 
-		 0.5f,  0.5f, -0.5f,	1.0f, 1.0f,
-		 0.5f, -0.5f, -0.5f,	1.0f, 0.0f,
-		-0.5f, -0.5f, -0.5f,	0.0f, 0.0f,
-		-0.5f,  0.5f, -0.5f,	0.0f, 1.0f,
+		 0.5f,  0.5f, -0.5f,	1.0f, 0.0f, -1.0f,	1.0f, 1.0f,
+		 0.5f, -0.5f, -0.5f,	1.0f, 0.0f, -1.0f,	1.0f, 0.0f,
+		-0.5f, -0.5f, -0.5f,	1.0f, 0.0f, -1.0f,	0.0f, 0.0f,
+		-0.5f,  0.5f, -0.5f,	1.0f, 0.0f, -1.0f,	0.0f, 1.0f,
 	};
 	cubeIndices = {
 		0, 1, 3,
@@ -863,25 +807,27 @@ void geneObejectData() {
 	glGenBuffers(1, &cubeVBO);
 	glGenBuffers(1, &cubeEBO);
 	glBindVertexArray(cubeVAO);
-	glBindBuffer(GL_ARRAY_BUFFER, cubeVBO);
-	glBufferData(GL_ARRAY_BUFFER, cubeVertices.size() * sizeof(float), cubeVertices.data(), GL_STATIC_DRAW);
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, cubeEBO);
-	glBufferData(GL_ELEMENT_ARRAY_BUFFER, cubeIndices.size() * sizeof(unsigned int), cubeIndices.data(), GL_STATIC_DRAW);
-	glEnableVertexAttribArray(0);
-	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)0);
-	glEnableVertexAttribArray(1);
-	glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
+		glBindBuffer(GL_ARRAY_BUFFER, cubeVBO);
+		glBufferData(GL_ARRAY_BUFFER, cubeVertices.size() * sizeof(float), cubeVertices.data(), GL_STATIC_DRAW);
+		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, cubeEBO);
+		glBufferData(GL_ELEMENT_ARRAY_BUFFER, cubeIndices.size() * sizeof(unsigned int), cubeIndices.data(), GL_STATIC_DRAW);
+		glEnableVertexAttribArray(0);
+		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
+		glEnableVertexAttribArray(1);
+		glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(3 * sizeof(float)));
+		glEnableVertexAttribArray(2);
+		glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(6 * sizeof(float)));
 	glBindVertexArray(0);
 	// ==================================================
 
 
 	// ========== Generate floor vertex data ==========
 	floorVertices = {
-		// Positions			// Texture Coords
-		-100.0,  0.0,  100.0,	25.0f,  0.0f,
-		 100.0,  0.0,  100.0,	25.0f, 25.0f,
-		 100.0,  0.0, -100.0,	 0.0f, 25.0f,
-		-100.0,  0.0, -100.0,	 0.0f,  0.0f,
+		// Positions			// Normals			// Texture Coords
+		-100.0,  0.0,  100.0,	0.0f, 1.0f, 0.0f,	25.0f,  0.0f,
+		 100.0,  0.0,  100.0,	0.0f, 1.0f, 0.0f,	25.0f, 25.0f,
+		 100.0,  0.0, -100.0,	0.0f, 1.0f, 0.0f,	 0.0f, 25.0f,
+		-100.0,  0.0, -100.0,	0.0f, 1.0f, 0.0f,	 0.0f,  0.0f,
 	};
 	floorIndices = {
 		0, 1, 2,
@@ -891,73 +837,77 @@ void geneObejectData() {
 	glGenBuffers(1, &floorVBO);
 	glGenBuffers(1, &floorEBO);
 	glBindVertexArray(floorVAO);
-	glBindBuffer(GL_ARRAY_BUFFER, floorVBO);
-	glBufferData(GL_ARRAY_BUFFER, floorVertices.size() * sizeof(float), floorVertices.data(), GL_STATIC_DRAW);
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, floorEBO);
-	glBufferData(GL_ELEMENT_ARRAY_BUFFER, floorIndices.size() * sizeof(unsigned int), floorIndices.data(), GL_STATIC_DRAW);
-	glEnableVertexAttribArray(0);
-	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)0);
-	glEnableVertexAttribArray(1);
-	glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
+		glBindBuffer(GL_ARRAY_BUFFER, floorVBO);
+		glBufferData(GL_ARRAY_BUFFER, floorVertices.size() * sizeof(float), floorVertices.data(), GL_STATIC_DRAW);
+		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, floorEBO);
+		glBufferData(GL_ELEMENT_ARRAY_BUFFER, floorIndices.size() * sizeof(unsigned int), floorIndices.data(), GL_STATIC_DRAW);
+		glEnableVertexAttribArray(0);
+		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
+		glEnableVertexAttribArray(1);
+		glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(3 * sizeof(float)));
+		glEnableVertexAttribArray(2);
+		glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(6 * sizeof(float)));
 	glBindVertexArray(0);
 	// ==================================================
 
 
 	// ========== Generate grass vertex data ==========
 	planeVertices = {
-		// positions			// texture coords
-		 0.0,  1.0, 0.0,		0.0, 0.0,
-		 0.0,  0.0, 0.0,		0.0, 1.0,
-		 1.0,  0.0, 0.0,		1.0, 1.0,
+		// Positions		// Normals			// Texture coords
+		 0.0,  1.0, 0.0,	0.0, 0.0, 1.0,		0.0, 0.0,
+		 0.0,  0.0, 0.0,	0.0, 0.0, 1.0,		0.0, 1.0,
+		 1.0,  0.0, 0.0,	0.0, 0.0, 1.0,		1.0, 1.0,
 
-		 0.0,  1.0, 0.0,		0.0, 0.0,
-		 1.0,  0.0, 0.0,		1.0, 1.0,
-		 1.0,  1.0, 0.0,		1.0, 0.0,
+		 0.0,  1.0, 0.0,	0.0, 0.0, 1.0,		0.0, 0.0,
+		 1.0,  0.0, 0.0,	0.0, 0.0, 1.0,		1.0, 1.0,
+		 1.0,  1.0, 0.0,	0.0, 0.0, 1.0,		1.0, 0.0,
 	};
 	glGenVertexArrays(1, &planeVAO);
 	glGenBuffers(1, &planeVBO);
 	glBindVertexArray(planeVAO);
-	glBindBuffer(GL_ARRAY_BUFFER, planeVBO);
-	glBufferData(GL_ARRAY_BUFFER, planeVertices.size() * sizeof(float), planeVertices.data(), GL_STATIC_DRAW);
-	glEnableVertexAttribArray(0);
-	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)0);
-	glEnableVertexAttribArray(1);
-	glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
+		glBindBuffer(GL_ARRAY_BUFFER, planeVBO);
+		glBufferData(GL_ARRAY_BUFFER, planeVertices.size() * sizeof(float), planeVertices.data(), GL_STATIC_DRAW);
+		glEnableVertexAttribArray(0);
+		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
+		glEnableVertexAttribArray(1);
+		glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(3 * sizeof(float)));
+		glEnableVertexAttribArray(2);
+		glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(6 * sizeof(float)));
 	glBindVertexArray(0);
 	// ==================================================
 	
 	// ========== Generate View Volume vertex data ==========
 	viewVolumeVertices = {
-		// positions			// texture coords
-		 0.5f,  0.5f,  0.5f,	1.0f, 1.0f,
-		 0.5f, -0.5f,  0.5f,	1.0f, 0.0f,
-		-0.5f, -0.5f,  0.5f,	0.0f, 0.0f,
-		-0.5f,  0.5f,  0.5f,	0.0f, 1.0f,
+		// Positions			// Normals			// Texture Coords
+		 0.5f,  0.5f,  0.5f,	0.0f, 0.0f, 1.0f,	1.0f, 1.0f,
+		 0.5f, -0.5f,  0.5f,	0.0f, 0.0f, 1.0f,	1.0f, 0.0f,
+		-0.5f, -0.5f,  0.5f,	0.0f, 0.0f, 1.0f,	0.0f, 0.0f,
+		-0.5f,  0.5f,  0.5f,	0.0f, 0.0f, 1.0f,	0.0f, 1.0f,
 
-		0.5f,  0.5f,  0.5f,		1.0f, 1.0f,
-		0.5f,  0.5f, -0.5f,		1.0f, 0.0f,
-		0.5f, -0.5f, -0.5f,		0.0f, 0.0f,
-		0.5f, -0.5f,  0.5f,		0.0f, 1.0f,
+		0.5f,  0.5f,  0.5f,		1.0f, 0.0f, 0.0f,	1.0f, 1.0f,
+		0.5f,  0.5f, -0.5f,		1.0f, 0.0f, 0.0f,	1.0f, 0.0f,
+		0.5f, -0.5f, -0.5f,		1.0f, 0.0f, 0.0f,	0.0f, 0.0f,
+		0.5f, -0.5f,  0.5f,		1.0f, 0.0f, 0.0f,	0.0f, 1.0f,
 
-		-0.5f,  0.5f,  0.5f,	1.0f, 1.0f,
-		-0.5f,  0.5f, -0.5f,	1.0f, 0.0f,
-		-0.5f, -0.5f, -0.5f,	0.0f, 0.0f,
-		-0.5f, -0.5f,  0.5f,	0.0f, 1.0f,
+		-0.5f,  0.5f,  0.5f,	-1.0f, 0.0f, 0.0f,	1.0f, 1.0f,
+		-0.5f,  0.5f, -0.5f,	-1.0f, 0.0f, 0.0f,	1.0f, 0.0f,
+		-0.5f, -0.5f, -0.5f,	-1.0f, 0.0f, 0.0f,	0.0f, 0.0f,
+		-0.5f, -0.5f,  0.5f,	-1.0f, 0.0f, 0.0f,	0.0f, 1.0f,
 
-		 0.5f,  0.5f,  0.5f,	1.0f, 1.0f,
-		 0.5f,  0.5f, -0.5f,	1.0f, 0.0f,
-		-0.5f,  0.5f, -0.5f,	0.0f, 0.0f,
-		-0.5f,  0.5f,  0.5f,	0.0f, 1.0f,
+		 0.5f,  0.5f,  0.5f,	0.0f, 1.0f, 0.0f,	1.0f, 1.0f,
+		 0.5f,  0.5f, -0.5f,	0.0f, 1.0f, 0.0f,	1.0f, 0.0f,
+		-0.5f,  0.5f, -0.5f,	0.0f, 1.0f, 0.0f,	0.0f, 0.0f,
+		-0.5f,  0.5f,  0.5f,	0.0f, 1.0f, 0.0f,	0.0f, 1.0f,
 
-		 0.5f, -0.5f,  0.5f,	1.0f, 1.0f,
-		 0.5f, -0.5f, -0.5f,	1.0f, 0.0f,
-		-0.5f, -0.5f, -0.5f,	0.0f, 0.0f,
-		-0.5f, -0.5f,  0.5f,	0.0f, 1.0f,
+		 0.5f, -0.5f,  0.5f,	0.0f, -1.0f, 0.0f,	1.0f, 1.0f,
+		 0.5f, -0.5f, -0.5f,	0.0f, -1.0f, 0.0f,	1.0f, 0.0f,
+		-0.5f, -0.5f, -0.5f,	0.0f, -1.0f, 0.0f,	0.0f, 0.0f,
+		-0.5f, -0.5f,  0.5f,	0.0f, -1.0f, 0.0f,	0.0f, 1.0f,
 
-		 0.5f,  0.5f, -0.5f,	1.0f, 1.0f,
-		 0.5f, -0.5f, -0.5f,	1.0f, 0.0f,
-		-0.5f, -0.5f, -0.5f,	0.0f, 0.0f,
-		-0.5f,  0.5f, -0.5f,	0.0f, 1.0f,
+		 0.5f,  0.5f, -0.5f,	0.0f, 0.0f, -1.0f,	1.0f, 1.0f,
+		 0.5f, -0.5f, -0.5f,	0.0f, 0.0f, -1.0f,	1.0f, 0.0f,
+		-0.5f, -0.5f, -0.5f,	0.0f, 0.0f, -1.0f,	0.0f, 0.0f,
+		-0.5f,  0.5f, -0.5f,	0.0f, 0.0f, -1.0f,	0.0f, 1.0f,
 	};
 	viewVolumeIndices = {
 		0, 1, 3,
@@ -987,9 +937,11 @@ void geneObejectData() {
 		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, viewVolumeEBO);
 		glBufferData(GL_ELEMENT_ARRAY_BUFFER, viewVolumeIndices.size() * sizeof(unsigned int), viewVolumeIndices.data(), GL_STATIC_DRAW);
 		glEnableVertexAttribArray(0);
-		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)0);
+		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
 		glEnableVertexAttribArray(1);
-		glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
+		glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(3 * sizeof(float)));
+		glEnableVertexAttribArray(2);
+		glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(6 * sizeof(float)));
 	glBindVertexArray(0);
 	// ==================================================
 
@@ -1019,6 +971,19 @@ void geneSphereData() {
 			sphereVertices.push_back(radius * x);
 			sphereVertices.push_back(radius * y);
 			sphereVertices.push_back(radius * z);
+
+			// Generate normal vectors
+			glm::vec3 normal = glm::vec3(2 * radius * x, 2 * radius * y, 2 * radius * z);
+			normal = glm::normalize(normal);
+			sphereVertices.push_back(normal.x);
+			sphereVertices.push_back(normal.y);
+			sphereVertices.push_back(normal.z);
+
+			// Generate texture coordinate
+			float u = 1 - (j / longitude);
+			float v = 1 - (i / latitude);
+			sphereVertices.push_back(u);
+			sphereVertices.push_back(-v);
 		}
 	}
 
@@ -1041,13 +1006,145 @@ void geneSphereData() {
 	glGenBuffers(1, &sphereVBO);
 	glGenBuffers(1, &sphereEBO);
 	glBindVertexArray(sphereVAO);
-	glBindBuffer(GL_ARRAY_BUFFER, sphereVBO);
-	glBufferData(GL_ARRAY_BUFFER, sphereVertices.size() * sizeof(float), sphereVertices.data(), GL_STATIC_DRAW);
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, sphereEBO);
-	glBufferData(GL_ELEMENT_ARRAY_BUFFER, sphereIndices.size() * sizeof(unsigned int), sphereIndices.data(), GL_STATIC_DRAW);
-	glEnableVertexAttribArray(0);
-	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+		glBindBuffer(GL_ARRAY_BUFFER, sphereVBO);
+		glBufferData(GL_ARRAY_BUFFER, sphereVertices.size() * sizeof(float), sphereVertices.data(), GL_STATIC_DRAW);
+		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, sphereEBO);
+		glBufferData(GL_ELEMENT_ARRAY_BUFFER, sphereIndices.size() * sizeof(unsigned int), sphereIndices.data(), GL_STATIC_DRAW);
+		glEnableVertexAttribArray(0);
+		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
+		glEnableVertexAttribArray(1);
+		glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(3 * sizeof(float)));
+		glEnableVertexAttribArray(2);
+		glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(6 * sizeof(float)));
 	glBindVertexArray(0);
+}
+
+void updateViewVolumeData() {
+
+	glm::vec4 rtnp, ltnp, rbnp, lbnp, rtfp, ltfp, rbfp, lbfp = glm::vec4(1.0f);
+
+	if(isPerspective) {
+		// 計算透視投影矩陣的各參數
+		float p_tn = tan(glm::radians(((isGhost) ? camera.Zoom : followCamera.Zoom) / 2)) * global_near;
+		float p_bn = -p_tn;
+		float p_rn = p_tn * aspect_wh;
+		float p_ln = -p_rn;
+
+		float p_tf = p_tn * global_far / global_near;
+		float p_bf = -p_tf;
+		float p_rf = p_rn * global_far / global_near;
+		float p_lf = -p_rf;
+
+		global_left = p_ln;
+		global_right = p_rn;
+		global_bottom = p_bn;
+		global_top = p_tn;
+
+		// 創建近平面的4個頂點 （記得要將近平面往前多挪0.01，攝影機才不會看不到）
+		rtnp = glm::vec4(p_rn, p_tn, -global_near + 0.01, 1.0);
+		ltnp = glm::vec4(p_ln, p_tn, -global_near + 0.01, 1.0);
+		rbnp = glm::vec4(p_rn, p_bn, -global_near + 0.01, 1.0);
+		lbnp = glm::vec4(p_ln, p_bn, -global_near + 0.01, 1.0);
+
+		// 創建遠平面的4個頂點　（記得要將遠平面往後多挪0.01，背景才不會打架）
+		rtfp = glm::vec4(p_rf, p_tf, -global_far - 0.01, 1.0);
+		ltfp = glm::vec4(p_lf, p_tf, -global_far - 0.01, 1.0);
+		rbfp = glm::vec4(p_rf, p_bf, -global_far - 0.01, 1.0);
+		lbfp = glm::vec4(p_lf, p_bf, -global_far - 0.01, 1.0);
+	} else {
+		float length = tan(glm::radians(((isGhost) ? camera.Zoom : followCamera.Zoom) / 2)) * global_near * 50;
+		float r, t = 0.0f;
+		if (SCR_WIDTH > SCR_HEIGHT) {
+			r = length;
+			t = length * aspect_hw;
+		} else {
+			r = length * aspect_wh;
+			t = length;
+		}
+		float l = -r;
+		float b = -t;
+
+		global_left = l;
+		global_right = r;
+		global_bottom = b;
+		global_top = t;
+		
+		// 創建近平面的4個頂點 （記得要將近平面往前多挪0.01，攝影機才不會看不到）
+		rtnp = glm::vec4(r, t, -global_near + 0.01, 1.0);
+		ltnp = glm::vec4(l, t, -global_near + 0.01, 1.0);
+		rbnp = glm::vec4(r, b, -global_near + 0.01, 1.0);
+		lbnp = glm::vec4(l, b, -global_near + 0.01, 1.0);
+
+		// 創建遠平面的4個頂點　（記得要將遠平面往後多挪0.01，背景才不會打架）
+		rtfp = glm::vec4(r, t, -global_far - 0.01, 1.0);
+		ltfp = glm::vec4(l, t, -global_far - 0.01, 1.0);
+		rbfp = glm::vec4(r, b, -global_far - 0.01, 1.0);
+		lbfp = glm::vec4(l, b, -global_far - 0.01, 1.0);
+	}
+
+	// 取得右下角之觀察矩陣後，求反矩陣
+	setViewMatrix(3);
+	glm::mat4 view_inv = glm::inverse(view);
+
+	// 將這些頂點乘上觀察反矩陣，即可求出世界坐標系頂點（先算近平面）
+	rtnp = view_inv * rtnp;
+	ltnp = view_inv * ltnp;
+	rbnp = view_inv * rbnp;
+	lbnp = view_inv * lbnp;
+
+	// 再來換遠平面
+	rtfp = view_inv * rtfp;
+	ltfp = view_inv * ltfp;
+	rbfp = view_inv * rbfp;
+	lbfp = view_inv * lbfp;
+
+	nearPlaneVertex = {
+		rtnp, ltnp, rbnp, lbnp
+	};
+	farPlaneVertex = {
+		rtfp, ltfp, rbfp, lbfp
+	};
+
+	// 更新 View Volume 的頂點資料
+	viewVolumeVertices = {
+		// Positions				// Normals			// Texture Coords
+
+		// Front
+		rtnp.x, rtnp.y, rtnp.z,		0.0f, 0.0f, 1.0f,	1.0f, 1.0f,
+		rbnp.x, rbnp.y, rbnp.z,		0.0f, 0.0f, 1.0f,	1.0f, 0.0f,
+		lbnp.x, lbnp.y, lbnp.z,		0.0f, 0.0f, 1.0f,	0.0f, 0.0f,
+		ltnp.x, ltnp.y, ltnp.z,		0.0f, 0.0f, 1.0f,	0.0f, 1.0f,
+
+		// Right
+		rtnp.x, rtnp.y, rtnp.z,		1.0f, 0.0f, 0.0f,	1.0f, 1.0f,
+		rtfp.x, rtfp.y, rtfp.z,		1.0f, 0.0f, 0.0f,	1.0f, 0.0f,
+		rbfp.x, rbfp.y, rbfp.z,		1.0f, 0.0f, 0.0f,	0.0f, 0.0f,
+		rbnp.x, rbnp.y, rbnp.z,		1.0f, 0.0f, 0.0f,	0.0f, 1.0f,
+
+		// Left
+		ltnp.x, ltnp.y, ltnp.z,		-1.0f, 0.0f, 0.0f,	1.0f, 1.0f,
+		ltfp.x, ltfp.y, ltfp.z,		-1.0f, 0.0f, 0.0f,	1.0f, 0.0f,
+		lbfp.x, lbfp.y, lbfp.z,		-1.0f, 0.0f, 0.0f,	0.0f, 0.0f,
+		lbnp.x, lbnp.y, lbnp.z,		-1.0f, 0.0f, 0.0f,	0.0f, 1.0f,
+
+		// Top
+		rtnp.x, rtnp.y, rtnp.z,		0.0f, 1.0f, 0.0f,	1.0f, 1.0f,
+		rtfp.x, rtfp.y, rtfp.z,		0.0f, 1.0f, 0.0f,	1.0f, 0.0f,
+		ltfp.x, ltfp.y, ltfp.z,		0.0f, 1.0f, 0.0f,	0.0f, 0.0f,
+		ltnp.x, ltnp.y, ltnp.z,		0.0f, 1.0f, 0.0f,	0.0f, 1.0f,
+
+		// Down
+		rbnp.x, rbnp.y, rbnp.z,		0.0f, -1.0f, 0.0f,	1.0f, 1.0f,
+		rbfp.x, rbfp.y, rbfp.z,		0.0f, -1.0f, 0.0f,	1.0f, 0.0f,
+		lbfp.x, lbfp.y, lbfp.z,		0.0f, -1.0f, 0.0f,	0.0f, 0.0f,
+		lbnp.x, lbnp.y, lbnp.z,		0.0f, -1.0f, 0.0f,	0.1f, 0.0f,
+
+		// Back
+		rtfp.x, rtfp.y, rtfp.z,		0.0f, 0.0f, -1.0f,	1.0f, 1.0f,
+		rbfp.x,	rbfp.y, rbfp.z,		0.0f, 0.0f, -1.0f,	1.0f, 0.0f,
+		lbfp.x,	lbfp.y, lbfp.z,		0.0f, 0.0f, -1.0f,	0.0f, 0.0f,
+		ltfp.x,	ltfp.y, ltfp.z,		0.0f, 0.0f, -1.0f,	0.1f, 0.0f,
+	};
 }
 
 void drawFloor() {
@@ -1258,6 +1355,7 @@ void drawCamera(Shader shader) {
 }
 
 void drawAxis(Shader shader) {
+	shader.setBool("isGlowObj", true);
 	modelMatrix.push();
 	modelMatrix.push();
 	modelMatrix.save(glm::translate(modelMatrix.top(), glm::vec3(1.5f, 0.0f, 0.0f)));
@@ -1285,6 +1383,7 @@ void drawAxis(Shader shader) {
 	drawCube();
 	modelMatrix.pop();
 	modelMatrix.pop();
+	shader.setBool("isGlowObj", false);
 }
 
 void processROV(ROV_Movement direction, float deltaTime) {
@@ -1518,6 +1617,17 @@ void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods
 		else {
 			isGhost = true;
 			logging::loggingMessage(logging::LogType::INFO, "You're a ghost!");
+		}
+	}
+	
+	if (key == GLFW_KEY_Y) {
+		if (isPerspective) {
+			isPerspective = false;
+			logging::loggingMessage(logging::LogType::INFO, "Using Orthogonal Projection");
+		}
+		else {
+			isPerspective = true;
+			logging::loggingMessage(logging::LogType::INFO, "Using Perspective Projection");
 		}
 	}
 
